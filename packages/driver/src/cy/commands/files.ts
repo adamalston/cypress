@@ -3,7 +3,7 @@ import { basename, isAbsolute, relative, resolve } from 'path'
 
 import $errUtils from '../../cypress/error_utils'
 import type { Log } from '../../cypress/log'
-import { runPrivilegedCommand, runPrivilegedFileCommand } from '../../util/privileged_channel'
+import { runPrivilegedFileCommand, runPrivilegedFileWriteCommand } from '../../util/privileged_channel'
 
 interface InternalWriteFileOptions extends Partial<Cypress.WriteFileOptions & Cypress.Timeoutable> {
   _log?: Log
@@ -200,10 +200,10 @@ export default (Commands, Cypress, cy, state) => {
       // the timeout ourselves
       cy.clearTimeout()
 
-      return runPrivilegedCommand({
+      return runPrivilegedFileWriteCommand({
         commandName: 'writeFile',
         cy,
-        Cypress: (Cypress as unknown) as InternalCypress.Cypress,
+        Cypress,
         options: {
           fileName,
           contents,

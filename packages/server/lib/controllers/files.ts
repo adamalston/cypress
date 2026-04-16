@@ -7,7 +7,7 @@ import { getCtx } from '@packages/data-context'
 import { DocumentDomainInjection } from '@packages/network-tools'
 import type { Request, Response } from 'express'
 import { privilegedCommandsManager } from '../privileged-commands/privileged-commands-manager'
-import { createReadFileStreamFromPath } from '../files'
+import { createReadFileStreamFromPath, createWriteFileStreamFromPath } from '../files'
 import * as errors from '../errors'
 import type { Cfg } from '../project-base'
 import type { RemoteStates } from '../remote_states'
@@ -17,6 +17,15 @@ const debug = Debug('cypress:server:controllers')
 type PrivilegedFileReadRequest = Request<{}, {}, {
   token: string
 }>
+
+type PrivilegedFileWriteRequest = Request
+
+const addFileStreamMetadata = (error, filePath, originalFilePath) => {
+  error.filePath = error.filePath ?? filePath
+  error.originalFilePath = error.originalFilePath ?? originalFilePath
+
+  return error
+}
 
 export = {
 
@@ -138,6 +147,72 @@ export = {
       })
 
       stream.pipe(res)
+    } catch (error) {
+      res.status(500).json({ error: errors.cloneErr(error) })
+    }
+  },
+
+  async handlePrivilegedFileWrite (
+    req: PrivilegedFileWriteRequest,
+    res: Response,
+  ) {
+    const token = req.get('x-cypress-privileged-file-token')
+    const contentsType = req.get('x-cypress-file-contents-type')
+
+    try {
+      if (!token || !_.isString(token)) {
+        throw new Error(
+          'You requested a privileged file write without a valid token',
+        )
+      }
+
+      if (contentsType !== 'buffer' && contentsType !== 'string') {
+        throw new Error(
+          'You requested a privileged file write without a valid contents type',
+        )
+      }
+
+      const {
+        encoding,
+        filePath,
+        flag,
+        originalFilePath,
+      } = privilegedCommandsManager.consumePrivilegedFileWrite(token)
+
+      const { stream } = await createWriteFileStreamFromPath({
+        encoding,
+        filePath,
+        flag,
+        originalFilePath,
+      })
+
+      if (contentsType === 'string') {
+        req.setEncoding('utf8')
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        const handleError = (error) => {
+          cleanup()
+          stream.destroy()
+          reject(addFileStreamMetadata(error, filePath, originalFilePath))
+        }
+        const handleFinish = () => {
+          cleanup()
+          resolve()
+        }
+        const cleanup = () => {
+          req.off('error', handleError)
+          stream.off('error', handleError)
+          stream.off('finish', handleFinish)
+        }
+
+        req.on('error', handleError)
+        stream.on('error', handleError)
+        stream.on('finish', handleFinish)
+        req.pipe(stream)
+      })
+
+      res.status(200).json({ filePath })
     } catch (error) {
       res.status(500).json({ error: errors.cloneErr(error) })
     }

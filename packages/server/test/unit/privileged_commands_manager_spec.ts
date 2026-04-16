@@ -52,26 +52,84 @@ describe('lib/privileged-commands/privileged-commands-manager', () => {
   })
 
   it('should reject unverified privileged file reads in e2e mode', () => {
-    expect(() => privilegedCommandsManager.createPrivilegedFileRead(config, {
-      args: ['arg-hash'],
-      commandName: 'readFile',
-      options: {
-        file: 'foo.txt',
-      },
-    })).to.throw('cy.readFile() must be invoked from the spec file or support file')
+    expect(() => {
+      privilegedCommandsManager.createPrivilegedFileRead(config, {
+        args: ['arg-hash'],
+        commandName: 'readFile',
+        options: {
+          file: 'foo.txt',
+        },
+      })
+    }).to.throw('cy.readFile() must be invoked from the spec file or support file')
   })
 
   it('should reject unsupported privileged file read commands', () => {
     addVerifiedCommand('writeFile')
 
-    expect(() => privilegedCommandsManager.createPrivilegedFileRead(config, {
+    expect(() => {
+      privilegedCommandsManager.createPrivilegedFileRead(config, {
+        args: ['arg-hash'],
+        commandName: 'writeFile',
+        options: {
+          file: 'foo.txt',
+        },
+      })
+    }).to.throw(
+      'You requested a privileged file read for a command we cannot handle: writeFile',
+    )
+  })
+
+  it('should create one-time file write tokens for verified commands', () => {
+    addVerifiedCommand('writeFile')
+
+    const fileWrite = privilegedCommandsManager.createPrivilegedFileWrite(config, {
       args: ['arg-hash'],
       commandName: 'writeFile',
       options: {
-        file: 'foo.txt',
+        encoding: null,
+        fileName: 'foo.txt',
+        flag: 'a+',
       },
-    })).to.throw(
-      'You requested a privileged file read for a command we cannot handle: writeFile',
+    })
+
+    expect(fileWrite.filePath).to.equal(path.resolve(projectRoot, 'foo.txt'))
+    expect(fileWrite.token).to.be.a('string')
+
+    expect(privilegedCommandsManager.consumePrivilegedFileWrite(fileWrite.token)).to.deep.equal({
+      encoding: null,
+      filePath: path.resolve(projectRoot, 'foo.txt'),
+      flag: 'a+',
+      originalFilePath: 'foo.txt',
+    })
+
+    expect(() => privilegedCommandsManager.consumePrivilegedFileWrite(fileWrite.token)).to.throw('You requested a privileged file write with an invalid token')
+  })
+
+  it('should reject unverified privileged file writes in e2e mode', () => {
+    expect(() => {
+      privilegedCommandsManager.createPrivilegedFileWrite(config, {
+        args: ['arg-hash'],
+        commandName: 'writeFile',
+        options: {
+          fileName: 'foo.txt',
+        },
+      })
+    }).to.throw('cy.writeFile() must be invoked from the spec file or support file')
+  })
+
+  it('should reject unsupported privileged file write commands', () => {
+    addVerifiedCommand('readFile')
+
+    expect(() => {
+      privilegedCommandsManager.createPrivilegedFileWrite(config, {
+        args: ['arg-hash'],
+        commandName: 'readFile',
+        options: {
+          fileName: 'foo.txt',
+        },
+      })
+    }).to.throw(
+      'You requested a privileged file write for a command we cannot handle: readFile',
     )
   })
 
@@ -79,15 +137,15 @@ describe('lib/privileged-commands/privileged-commands-manager', () => {
     it(`should reject ${commandName} through runPrivilegedCommand`, () => {
       addVerifiedCommand(commandName)
 
-      expect(() =>
+      expect(() => {
         privilegedCommandsManager.runPrivilegedCommand(config, {
           args: ['arg-hash'],
           commandName,
           options: {
             file: 'foo.txt',
           },
-        }),
-      ).to.throw(
+        })
+      }).to.throw(
         `You requested a secure backend event for a command we cannot handle: ${
           commandName
         }`,

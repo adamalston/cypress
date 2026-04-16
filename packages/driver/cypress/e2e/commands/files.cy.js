@@ -1,14 +1,11 @@
 const { assertLogLength } = require('../../support/utils')
 const { stripIndent } = require('common-tags')
 
-const okResponse = {
-  contents: 'contents',
-  filePath: '/path/to/foo.json',
-}
-
 const privilegedFileReadUrl = '/__cypress/privileged-commands/read-file'
+const privilegedFileWriteUrl = '/__cypress/privileged-commands/write-file'
 
 let restoreFetch = () => {}
+let lastPrivilegedFileWriteRequest
 
 const getPrivilegedFileReadRequest = (input, init) => {
   const requestUrl = typeof input === 'string' ? input : input?.url
@@ -25,6 +22,26 @@ const getPrivilegedFileReadRequest = (input, init) => {
   return JSON.parse(String(init.body))
 }
 
+const getPrivilegedFileWriteRequest = (input, init) => {
+  const requestUrl = typeof input === 'string' ? input : input?.url
+
+  if (typeof requestUrl !== 'string' || init?.method !== 'POST') return
+
+  const normalizedPathname = new URL(
+    requestUrl,
+    window.location.origin,
+  ).pathname
+
+  if (normalizedPathname !== privilegedFileWriteUrl) return
+
+  return {
+    body: init.body,
+    contentsType: init.headers?.['x-cypress-file-contents-type'],
+    contentType: init.headers?.['Content-Type'],
+    token: init.headers?.['x-cypress-privileged-file-token'],
+  }
+}
+
 const createPrivilegedFileReadResponse = (body, filePath) => {
   return new Response(body, {
     headers: {
@@ -35,6 +52,24 @@ const createPrivilegedFileReadResponse = (body, filePath) => {
 }
 
 const createPrivilegedFileReadErrorResponse = (error) => {
+  return new Response(JSON.stringify({ error }), {
+    headers: {
+      'content-type': 'application/json',
+    },
+    status: 500,
+  })
+}
+
+const createPrivilegedFileWriteResponse = (filePath) => {
+  return new Response(JSON.stringify({ filePath }), {
+    headers: {
+      'content-type': 'application/json',
+    },
+    status: 200,
+  })
+}
+
+const createPrivilegedFileWriteErrorResponse = (error) => {
   return new Response(JSON.stringify({ error }), {
     headers: {
       'content-type': 'application/json',
@@ -110,9 +145,68 @@ const stubPrivilegedFileRead = (handler) => {
   }
 }
 
+const stubPrivilegedFileWrite = (handler) => {
+  const responsesByToken = new Map()
+  let tokenCount = 0
+
+  lastPrivilegedFileWriteRequest = undefined
+  const fetchStubs = getPrivilegedFileReadWindows().map((candidateWindow) => {
+    const originalFetch = candidateWindow.fetch.bind(candidateWindow)
+
+    return Cypress.sinon.stub(candidateWindow, 'fetch').callsFake((input, init) => {
+      const request = getPrivilegedFileWriteRequest(input, init)
+
+      if (!request) return originalFetch(input, init)
+
+      lastPrivilegedFileWriteRequest = request
+
+      const response = responsesByToken.get(request.token)
+
+      if (typeof response === 'undefined') return originalFetch(input, init)
+
+      return Promise.resolve(response)
+    })
+  })
+
+  Cypress.backend.withArgs('create:privileged:file:write').callsFake((eventName, request) => {
+    const response = handler(request)
+
+    if (typeof response === 'undefined') {
+      throw new Error(
+        `No stubbed privileged file write response was returned for ${
+          request.options.fileName
+        }`,
+      )
+    }
+
+    const token = `stubbed-file-write-token-${tokenCount++}`
+    const responsePromise = Promise.resolve(response)
+
+    responsesByToken.set(token, responsePromise)
+
+    return responsePromise.then(async (resolvedResponse) => {
+      return {
+        filePath: (await resolvedResponse.clone().json()).filePath,
+        token,
+      }
+    })
+  })
+
+  restoreFetch = () => {
+    fetchStubs.forEach((fetchStub) => fetchStub.restore())
+    restoreFetch = () => {}
+  }
+}
+
 const getReadFilePrivilegedCalls = () => {
   return Cypress.backend.getCalls().filter(
     (call) => call.args[0] === 'run:privileged' && call.args[1]?.commandName === 'readFile',
+  )
+}
+
+const getWriteFilePrivilegedCalls = () => {
+  return Cypress.backend.getCalls().filter(
+    (call) => call.args[0] === 'run:privileged' && call.args[1]?.commandName === 'writeFile',
   )
 }
 
@@ -642,90 +736,120 @@ describe('src/cy/commands/files', () => {
 
   describe('#writeFile', () => {
     it('sends privileged writeFile to backend with the right options', () => {
-      Cypress.backend.resolves(okResponse)
+      stubPrivilegedFileWrite((request) => {
+        expect(request).to.deep.eq({
+          args: [request.args[0], request.args[1]],
+          commandName: 'writeFile',
+          options: {
+            encoding: 'utf8',
+            fileName: 'foo.txt',
+            flag: 'w',
+          },
+        })
+
+        return createPrivilegedFileWriteResponse('/path/to/foo.txt')
+      })
 
       cy.writeFile('foo.txt', 'contents').then(() => {
-        expect(Cypress.backend).to.be.calledWith(
-          'run:privileged',
-          {
-            args: ['2916834115813688', '4891975990226114'],
-            commandName: 'writeFile',
-            options: {
-              fileName: 'foo.txt',
-              contents: 'contents',
-              encoding: 'utf8',
-              flag: 'w',
-            },
-          },
-        )
+        expect(getWriteFilePrivilegedCalls().length).to.eq(0)
       })
     })
 
     it('can take encoding as third argument', () => {
-      Cypress.backend.resolves(okResponse)
-
-      cy.writeFile('foo.txt', 'contents', 'ascii').then(() => {
-        expect(Cypress.backend).to.be.calledWith(
-          'run:privileged',
-          {
-            args: ['2916834115813688', '4891975990226114', '2573904513237804'],
-            commandName: 'writeFile',
-            options: {
-              fileName: 'foo.txt',
-              contents: 'contents',
-              encoding: 'ascii',
-              flag: 'w',
-            },
+      stubPrivilegedFileWrite((request) => {
+        expect(request).to.deep.eq({
+          args: [request.args[0], request.args[1], request.args[2]],
+          commandName: 'writeFile',
+          options: {
+            encoding: 'ascii',
+            fileName: 'foo.txt',
+            flag: 'w',
           },
-        )
+        })
+
+        return createPrivilegedFileWriteResponse('/path/to/foo.txt')
       })
+
+      cy.writeFile('foo.txt', 'contents', 'ascii')
     })
 
     // https://github.com/cypress-io/cypress/issues/1558
     it('explicit null encoding is sent to server as Buffer', () => {
-      Cypress.backend.resolves(okResponse)
-
       const buffer = Buffer.from([0, 0, 54, 255])
 
-      cy.writeFile('foo.txt', buffer, null).then(() => {
-        expect(Cypress.backend).to.be.calledWith(
-          'run:privileged',
-          {
-            args: ['2916834115813688', '6309890104324788', '6158203196586298'],
-            commandName: 'writeFile',
-            options: {
-              fileName: 'foo.txt',
-              contents: buffer,
-              encoding: null,
-              flag: 'w',
-            },
+      stubPrivilegedFileWrite((request) => {
+        expect(request).to.deep.eq({
+          args: [request.args[0], request.args[1], request.args[2]],
+          commandName: 'writeFile',
+          options: {
+            encoding: null,
+            fileName: 'foo.txt',
+            flag: 'w',
           },
-        )
+        })
+
+        return createPrivilegedFileWriteResponse('/path/to/foo.txt')
+      })
+
+      cy.writeFile('foo.txt', buffer, null).then(() => {
+        expect(lastPrivilegedFileWriteRequest.contentsType).to.eq('buffer')
+        expect(lastPrivilegedFileWriteRequest.body).to.be.instanceOf(ArrayBuffer)
+        expect(Array.from(new Uint8Array(lastPrivilegedFileWriteRequest.body))).to.deep.eq(Array.from(buffer))
+      })
+    })
+
+    it('should upload file contents over HTTP instead of the privileged socket', () => {
+      stubPrivilegedFileWrite((request) => {
+        expect(request).to.deep.eq({
+          args: [request.args[0], request.args[1]],
+          commandName: 'writeFile',
+          options: {
+            encoding: 'utf8',
+            fileName: 'foo.txt',
+            flag: 'w',
+          },
+        })
+
+        return createPrivilegedFileWriteResponse('/path/to/foo.txt')
+      })
+
+      cy.writeFile('foo.txt', 'contents').then(() => {
+        expect(getWriteFilePrivilegedCalls().length).to.eq(0)
       })
     })
 
     it('can take encoding as part of options', () => {
-      Cypress.backend.resolves(okResponse)
-
-      cy.writeFile('foo.txt', 'contents', { encoding: 'ascii' }).then(() => {
-        expect(Cypress.backend).to.be.calledWith(
-          'run:privileged',
-          {
-            args: ['2916834115813688', '4891975990226114', '4694939291947123'],
-            commandName: 'writeFile',
-            options: {
-              fileName: 'foo.txt',
-              contents: 'contents',
-              encoding: 'ascii',
-              flag: 'w',
-            },
+      stubPrivilegedFileWrite((request) => {
+        expect(request).to.deep.eq({
+          args: [request.args[0], request.args[1], request.args[2]],
+          commandName: 'writeFile',
+          options: {
+            encoding: 'ascii',
+            fileName: 'foo.txt',
+            flag: 'w',
           },
-        )
+        })
+
+        return createPrivilegedFileWriteResponse('/path/to/foo.txt')
+      })
+
+      cy.writeFile('foo.txt', 'contents', { encoding: 'ascii' })
+    })
+
+    it('should send string contents as a text upload', () => {
+      stubPrivilegedFileWrite(() => {
+        return createPrivilegedFileWriteResponse('/path/to/foo.txt')
+      })
+
+      cy.writeFile('foo.txt', 'contents').then(() => {
+        expect(lastPrivilegedFileWriteRequest.body).to.eq('contents')
+        expect(lastPrivilegedFileWriteRequest.contentsType).to.eq('string')
+        expect(lastPrivilegedFileWriteRequest.contentType).to.eq('text/plain;charset=UTF-8')
       })
     })
 
     it('yields null', () => {
-      Cypress.backend.resolves(okResponse)
+      stubPrivilegedFileWrite(() => createPrivilegedFileWriteResponse('/path/to/foo.txt'))
 
       cy.writeFile('foo.txt', 'contents').then((subject) => {
         expect(subject).to.eq(null)
@@ -733,19 +857,19 @@ describe('src/cy/commands/files', () => {
     })
 
     it('can write a string', () => {
-      Cypress.backend.resolves(okResponse)
+      stubPrivilegedFileWrite(() => createPrivilegedFileWriteResponse('/path/to/foo.txt'))
 
       cy.writeFile('foo.txt', 'contents')
     })
 
     it('can write an array as json', () => {
-      Cypress.backend.resolves(okResponse)
+      stubPrivilegedFileWrite(() => createPrivilegedFileWriteResponse('/path/to/foo.json'))
 
       cy.writeFile('foo.json', [])
     })
 
     it('can write an object as json', () => {
-      Cypress.backend.resolves(okResponse)
+      stubPrivilegedFileWrite(() => createPrivilegedFileWriteResponse('/path/to/foo.json'))
 
       cy.writeFile('foo.json', {})
     })
@@ -760,23 +884,21 @@ describe('src/cy/commands/files', () => {
 
     describe('.flag', () => {
       it('sends a flag if specified', () => {
-        Cypress.backend.resolves(okResponse)
-
-        cy.writeFile('foo.txt', 'contents', { flag: 'a+' }).then(() => {
-          expect(Cypress.backend).to.be.calledWith(
-            'run:privileged',
-            {
-              args: ['2916834115813688', '4891975990226114', '2343101193011749'],
-              commandName: 'writeFile',
-              options: {
-                fileName: 'foo.txt',
-                contents: 'contents',
-                encoding: 'utf8',
-                flag: 'a+',
-              },
+        stubPrivilegedFileWrite((request) => {
+          expect(request).to.deep.eq({
+            args: [request.args[0], request.args[1], request.args[2]],
+            commandName: 'writeFile',
+            options: {
+              encoding: 'utf8',
+              fileName: 'foo.txt',
+              flag: 'a+',
             },
-          )
+          })
+
+          return createPrivilegedFileWriteResponse('/path/to/foo.txt')
         })
+
+        cy.writeFile('foo.txt', 'contents', { flag: 'a+' })
       })
 
       it('appends content to existing file if specified', () => {
@@ -804,7 +926,7 @@ describe('src/cy/commands/files', () => {
           this.hiddenLog = log
         })
 
-        Cypress.backend.resolves(okResponse)
+        stubPrivilegedFileWrite(() => createPrivilegedFileWriteResponse('/path/to/foo.txt'))
 
         cy.writeFile('foo.txt', 'contents', { log: false }).then(function () {
           const { lastLog, hiddenLog } = this
@@ -820,7 +942,7 @@ describe('src/cy/commands/files', () => {
           this.hiddenLog = log
         })
 
-        Cypress.backend.resolves(okResponse)
+        stubPrivilegedFileWrite(() => createPrivilegedFileWriteResponse('/path/to/foo.txt'))
 
         cy.writeFile('foo.txt', 'contents', { log: false }).then(function () {
           const { lastLog, hiddenLog } = this
@@ -833,7 +955,7 @@ describe('src/cy/commands/files', () => {
       })
 
       it('logs immediately before resolving', function () {
-        Cypress.backend.resolves(okResponse)
+        stubPrivilegedFileWrite(() => createPrivilegedFileWriteResponse('/path/to/foo.txt'))
 
         cy.on('log:added', (attrs, log) => {
           if (attrs.name === 'writeFile') {
@@ -936,7 +1058,14 @@ describe('src/cy/commands/files', () => {
         err.code = 'WHOKNOWS'
         err.filePath = '/path/to/foo.txt'
 
-        Cypress.backend.withArgs('run:privileged').rejects(err)
+        stubPrivilegedFileWrite(() => {
+          return createPrivilegedFileWriteErrorResponse({
+            code: err.code,
+            filePath: err.filePath,
+            message: err.message,
+            name: err.name,
+          })
+        })
 
         cy.on('fail', (err) => {
           const { lastLog } = this
@@ -962,7 +1091,7 @@ describe('src/cy/commands/files', () => {
       })
 
       it('throws when the write timeout expires', function (done) {
-        Cypress.backend.withArgs('run:privileged').callsFake(() => {
+        Cypress.backend.withArgs('create:privileged:file:write').callsFake(() => {
           return new Cypress.Promise(() => {})
         })
 
@@ -987,7 +1116,7 @@ describe('src/cy/commands/files', () => {
       it('uses defaultCommandTimeout config value if option not provided', {
         defaultCommandTimeout: 42,
       }, function (done) {
-        Cypress.backend.withArgs('run:privileged').callsFake(() => {
+        Cypress.backend.withArgs('create:privileged:file:write').callsFake(() => {
           return new Cypress.Promise(() => { /* Broken promise for timeout */ })
         })
 

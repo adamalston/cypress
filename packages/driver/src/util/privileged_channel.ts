@@ -37,10 +37,12 @@ type PrivilegedFileCommandResult = {
   contents: DecodedPrivilegedFileContents
   filePath: string
 }
-type PrivilegedFileRead = {
+type PrivilegedFileTransfer = {
   filePath: string
   token: string
 }
+type PrivilegedWriteableFileContents = string | Buffer
+type PrivilegedFileRequestBody = string | ArrayBuffer
 
 interface RunPrivilegedCommandOptions {
   commandName: string
@@ -59,16 +61,31 @@ interface RunPrivilegedFileCommandOptions {
   }
 }
 
+interface RunPrivilegedFileWriteCommandOptions {
+  commandName: 'writeFile'
+  cy: PrivilegedCy
+  Cypress: PrivilegedCommandCypress & {
+    config: (key: string) => string | undefined
+  }
+  options: {
+    contents: PrivilegedWriteableFileContents
+    encoding?: Cypress.Encodings | null
+    fileName: string
+    flag?: string
+  }
+}
+
 const getVerifiedCommand = (cy: PrivilegedCy): PrivilegedVerification => {
   const privilegeVerification = cy.state('current')?.get('privilegeVerification')
 
   return (Array.isArray(privilegeVerification) ? privilegeVerification[0] : undefined) ?? {}
 }
 
-const getPrivilegedFileReadUrl = (
+const getPrivilegedFileUrl = (
   Cypress: RunPrivilegedFileCommandOptions['Cypress'],
+  route: 'read-file' | 'write-file',
 ) => {
-  return `${window.location.origin}/${String(Cypress.config('namespace'))}/privileged-commands/read-file`
+  return `${window.location.origin}/${String(Cypress.config('namespace'))}/privileged-commands/${route}`
 }
 
 const readResponseAsArrayBuffer = async (response: Response) => {
@@ -150,6 +167,20 @@ const decodePrivilegedFileContents = (
   return stringContents
 }
 
+const getPrivilegedFileWriteBody = (
+  contents: PrivilegedWriteableFileContents,
+): PrivilegedFileRequestBody => {
+  if (Buffer.isBuffer(contents)) {
+    const arrayBuffer = new ArrayBuffer(contents.byteLength)
+
+    new Uint8Array(arrayBuffer).set(contents)
+
+    return arrayBuffer
+  }
+
+  return contents
+}
+
 export function runPrivilegedCommand ({ commandName, cy, Cypress, options }: RunPrivilegedCommandOptions): Bluebird<any> {
   const { args, promise } = getVerifiedCommand(cy)
 
@@ -175,7 +206,7 @@ export function runPrivilegedFileCommand ({
   return Bluebird
   .try(() => promise)
   .then(async () => {
-    const fileRead: PrivilegedFileRead = await Cypress.backend(
+    const fileRead: PrivilegedFileTransfer = await Cypress.backend(
       'create:privileged:file:read',
       {
         args,
@@ -187,7 +218,7 @@ export function runPrivilegedFileCommand ({
     )
 
     const response = await fetch(
-      getPrivilegedFileReadUrl(Cypress),
+      getPrivilegedFileUrl(Cypress, 'read-file'),
       {
         body: JSON.stringify({ token: fileRead.token }),
         headers: { 'Content-Type': 'application/json' },
@@ -210,6 +241,61 @@ export function runPrivilegedFileCommand ({
     return {
       contents,
       filePath,
+    }
+  })
+}
+
+export function runPrivilegedFileWriteCommand ({
+  commandName,
+  cy,
+  Cypress,
+  options,
+}: RunPrivilegedFileWriteCommandOptions): Bluebird<{
+  contents: PrivilegedWriteableFileContents
+  filePath: string
+}> {
+  const { args, promise } = getVerifiedCommand(cy)
+
+  return Bluebird
+  .try(() => promise)
+  .then(async () => {
+    const fileWrite: PrivilegedFileTransfer = await Cypress.backend(
+      'create:privileged:file:write',
+      {
+        args,
+        commandName,
+        options: {
+          encoding: options.encoding,
+          fileName: options.fileName,
+          flag: options.flag,
+        },
+      },
+    )
+
+    const contentsType = Buffer.isBuffer(options.contents) ? 'buffer' : 'string'
+    const requestBody = getPrivilegedFileWriteBody(options.contents)
+    const response = await fetch(
+      getPrivilegedFileUrl(Cypress as RunPrivilegedFileCommandOptions['Cypress'], 'write-file'),
+      {
+        body: requestBody,
+        headers: {
+          'Content-Type': contentsType === 'buffer'
+            ? 'application/octet-stream'
+            : 'text/plain;charset=UTF-8',
+          'x-cypress-file-contents-type': contentsType,
+          'x-cypress-privileged-file-token': fileWrite.token,
+        },
+        method: 'POST',
+      },
+    )
+
+    if (!response.ok) await throwResponseError(response)
+
+    const body = await response.json()
+
+    return {
+      contents: options.contents,
+      filePath: body?.filePath ?? fileWrite.filePath,
     }
   })
 }

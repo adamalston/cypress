@@ -19,6 +19,13 @@ interface PendingFileRead {
   originalFilePath: string
 }
 
+interface PendingFileWrite {
+  encoding?: BufferEncoding | null
+  filePath: string
+  flag?: string
+  originalFilePath: string
+}
+
 type NonSpecError = Error & { isNonSpec: boolean | undefined }
 type ChannelUrl = string
 type ChannelKey = string
@@ -26,6 +33,7 @@ type ChannelKey = string
 class PrivilegedCommandsManager {
   channelKeys: Record<ChannelUrl, ChannelKey> = {}
   pendingFileReads: Record<string, PendingFileRead> = {}
+  pendingFileWrites: Record<string, PendingFileWrite> = {}
   verifiedCommands: SpecOriginatedCommand[] = []
 
   async getPrivilegedChannel (options: {
@@ -141,6 +149,45 @@ class PrivilegedCommandsManager {
     return pendingFileRead
   }
 
+  createPrivilegedFileWrite (config, { commandName, args, options }) {
+    if (commandName !== 'writeFile') {
+      throw new Error(
+        `You requested a privileged file write for a command we cannot handle: ${
+          commandName
+        }`,
+      )
+    }
+
+    this.verifyCommand(config, { commandName, args })
+
+    const fileName = options?.fileName
+    const token = uuidv4()
+
+    this.pendingFileWrites[token] = {
+      encoding: options?.encoding,
+      filePath: path.resolve(config.projectRoot, fileName),
+      flag: options?.flag,
+      originalFilePath: fileName,
+    }
+
+    return {
+      filePath: this.pendingFileWrites[token].filePath,
+      token,
+    }
+  }
+
+  consumePrivilegedFileWrite (token: string) {
+    const pendingFileWrite = this.pendingFileWrites[token]
+
+    if (!pendingFileWrite) {
+      throw new Error('You requested a privileged file write with an invalid token')
+    }
+
+    delete this.pendingFileWrites[token]
+
+    return pendingFileWrite
+  }
+
   runPrivilegedCommand (config, { commandName, options, args }) {
     this.verifyCommand(config, { commandName, args })
 
@@ -169,6 +216,7 @@ class PrivilegedCommandsManager {
   reset () {
     this.channelKeys = {}
     this.pendingFileReads = {}
+    this.pendingFileWrites = {}
     this.verifiedCommands = []
   }
 }

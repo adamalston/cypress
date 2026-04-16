@@ -6,6 +6,8 @@ type FileStreamError = Error & {
   originalFilePath?: string
 }
 
+type WritableFileContents = string | Buffer
+
 export async function createReadFileStreamFromPath ({
   filePath,
   originalFilePath,
@@ -18,6 +20,53 @@ export async function createReadFileStreamFromPath ({
   try {
     // Wait for the stream to emit `open` so missing file errors are normalized
     // before the response starts streaming.
+    await new Promise<void>((resolve, reject) => {
+      const handleError = (error: FileStreamError) => {
+        error.originalFilePath = originalFilePath
+        error.filePath = filePath
+
+        reject(error)
+      }
+
+      stream.once('error', handleError)
+      stream.once('open', () => {
+        stream.off('error', handleError)
+        resolve()
+      })
+    })
+
+    return {
+      filePath,
+      stream,
+    }
+  } catch (error) {
+    stream.destroy()
+
+    throw error
+  }
+}
+
+export async function createWriteFileStreamFromPath ({
+  filePath,
+  originalFilePath,
+  encoding,
+  flag,
+}: {
+  filePath: string
+  originalFilePath?: string
+  encoding?: BufferEncoding | null
+  flag?: string
+}) {
+  await fs.ensureDir(path.dirname(filePath))
+
+  const stream = fs.createWriteStream(filePath, {
+    ...(encoding === null ? {} : { encoding: encoding === undefined ? 'utf8' : encoding }),
+    flags: flag ?? 'w',
+  })
+
+  try {
+    // Wait for the stream to emit `open` so path and permission errors are
+    // normalized before the request body starts flowing into the stream.
     await new Promise<void>((resolve, reject) => {
       const handleError = (error: FileStreamError) => {
         error.originalFilePath = originalFilePath
@@ -74,7 +123,7 @@ export async function readFile (projectRoot: string, options: { file: string, en
   }
 }
 
-export async function writeFile (projectRoot: string, options: { fileName: string, contents: string, encoding?: BufferEncoding, flag?: string } = { fileName: '', contents: '', encoding: 'utf8', flag: 'w' }) {
+export async function writeFile (projectRoot: string, options: { fileName: string, contents: WritableFileContents, encoding?: BufferEncoding | null, flag?: string } = { fileName: '', contents: '', encoding: 'utf8', flag: 'w' }) {
   const filePath = path.resolve(projectRoot, options.fileName)
   const writeOptions = {
     encoding: options.encoding === undefined ? 'utf8' : options.encoding,

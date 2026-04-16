@@ -1,5 +1,7 @@
 require('../spec_helper')
 
+const EventEmitter = require('events')
+
 const filesController = require('../../lib/controllers/files')
 const files = require('../../lib/files')
 const errors = require('../../lib/errors')
@@ -33,6 +35,31 @@ const createStream = () => {
   }
 
   return { handlers, stream }
+}
+
+const createWriteRequest = (headers = {}) => {
+  const req = new EventEmitter()
+
+  req.get = sinon.stub().callsFake((key) => headers[key])
+  req.off = req.removeListener.bind(req)
+  req.pipe = sinon.stub().callsFake((stream) => {
+    stream.emit('finish')
+
+    return stream
+  })
+
+  req.setEncoding = sinon.stub()
+
+  return req
+}
+
+const createWritableStream = () => {
+  const stream = new EventEmitter()
+
+  stream.destroy = sinon.stub()
+  stream.off = stream.removeListener.bind(stream)
+
+  return stream
 }
 
 describe('controllers/files', () => {
@@ -154,5 +181,145 @@ describe('controllers/files', () => {
     expect(res.status).not.to.have.been.called
     expect(res.json).not.to.have.been.called
     expect(errors.cloneErr).not.to.have.been.called
+  })
+
+  it('should stream a privileged file write request to disk', async () => {
+    const req = createWriteRequest({
+      'x-cypress-file-contents-type': 'string',
+      'x-cypress-privileged-file-token': 'token-123',
+    })
+    const res = createResponse()
+    const stream = createWritableStream()
+
+    sinon.stub(privilegedCommandsManager, 'consumePrivilegedFileWrite').returns({
+      encoding: 'utf8',
+      filePath: '/project/root/foo.txt',
+      flag: 'w',
+      originalFilePath: 'foo.txt',
+    })
+
+    sinon.stub(files, 'createWriteFileStreamFromPath').resolves({ stream })
+    sinon.stub(errors, 'cloneErr')
+
+    await filesController.handlePrivilegedFileWrite(req, res)
+
+    expect(privilegedCommandsManager.consumePrivilegedFileWrite).to.have.been.calledWith('token-123')
+    expect(files.createWriteFileStreamFromPath).to.have.been.calledWith({
+      encoding: 'utf8',
+      filePath: '/project/root/foo.txt',
+      flag: 'w',
+      originalFilePath: 'foo.txt',
+    })
+
+    expect(req.setEncoding).to.have.been.calledWith('utf8')
+    expect(req.pipe).to.have.been.calledWith(stream)
+    expect(stream.destroy).not.to.have.been.called
+    expect(res.status).to.have.been.calledWith(200)
+    expect(res.json).to.have.been.calledWith({ filePath: '/project/root/foo.txt' })
+  })
+
+  it('should return a 500 response when the privileged file write token is missing', async () => {
+    const req = createWriteRequest({
+      'x-cypress-file-contents-type': 'string',
+    })
+    const res = createResponse()
+
+    sinon.stub(privilegedCommandsManager, 'consumePrivilegedFileWrite')
+    sinon.stub(files, 'createWriteFileStreamFromPath')
+    sinon.stub(errors, 'cloneErr').callsFake((error) => {
+      return {
+        message: error.message,
+        name: error.name,
+      }
+    })
+
+    await filesController.handlePrivilegedFileWrite(req, res)
+
+    expect(privilegedCommandsManager.consumePrivilegedFileWrite).not.to.have.been.called
+    expect(files.createWriteFileStreamFromPath).not.to.have.been.called
+    expect(res.status).to.have.been.calledWith(500)
+    expect(res.json).to.have.been.calledWith({
+      error: {
+        message: 'You requested a privileged file write without a valid token',
+        name: 'Error',
+      },
+    })
+  })
+
+  it('should return a 500 response when the privileged file write contents type is missing', async () => {
+    const req = createWriteRequest({
+      'x-cypress-privileged-file-token': 'token-123',
+    })
+    const res = createResponse()
+
+    sinon.stub(privilegedCommandsManager, 'consumePrivilegedFileWrite')
+    sinon.stub(files, 'createWriteFileStreamFromPath')
+    sinon.stub(errors, 'cloneErr').callsFake((error) => {
+      return {
+        message: error.message,
+        name: error.name,
+      }
+    })
+
+    await filesController.handlePrivilegedFileWrite(req, res)
+
+    expect(privilegedCommandsManager.consumePrivilegedFileWrite).not.to.have.been.called
+    expect(files.createWriteFileStreamFromPath).not.to.have.been.called
+    expect(res.status).to.have.been.calledWith(500)
+    expect(res.json).to.have.been.calledWith({
+      error: {
+        message: 'You requested a privileged file write without a valid contents type',
+        name: 'Error',
+      },
+    })
+  })
+
+  it('should return a 500 response when the privileged file write stream errors', async () => {
+    const req = createWriteRequest({
+      'x-cypress-file-contents-type': 'buffer',
+      'x-cypress-privileged-file-token': 'token-123',
+    })
+    const res = createResponse()
+    const stream = createWritableStream()
+    const streamError = Object.assign(new Error('stream failed'), { code: 'EISDIR' })
+
+    req.pipe.callsFake((destination) => {
+      destination.emit('error', streamError)
+
+      return destination
+    })
+
+    sinon.stub(privilegedCommandsManager, 'consumePrivilegedFileWrite').returns({
+      encoding: null,
+      filePath: '/project/root/foo.txt',
+      flag: 'w',
+      originalFilePath: 'foo.txt',
+    })
+
+    sinon.stub(files, 'createWriteFileStreamFromPath').resolves({ stream })
+    sinon.stub(errors, 'cloneErr').callsFake((error) => {
+      return {
+        code: error.code,
+        filePath: error.filePath,
+        message: error.message,
+        name: error.name,
+        originalFilePath: error.originalFilePath,
+      }
+    })
+
+    await filesController.handlePrivilegedFileWrite(req, res)
+
+    expect(req.setEncoding).not.to.have.been.called
+    expect(stream.destroy).to.have.been.called
+    expect(res.status).to.have.been.calledWith(500)
+    expect(res.json).to.have.been.calledWith({
+      error: {
+        code: 'EISDIR',
+        filePath: '/project/root/foo.txt',
+        message: 'stream failed',
+        name: 'Error',
+        originalFilePath: 'foo.txt',
+      },
+    })
   })
 })

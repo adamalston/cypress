@@ -215,6 +215,10 @@ export const createCommonRoutes = ({
     await files.handlePrivilegedFileRead(req, res)
   })
 
+  router.post(`/${config.namespace}/privileged-commands/write-file`, async (req, res) => {
+    await files.handlePrivilegedFileWrite(req, res)
+  })
+
   if (process.env.CYPRESS_INTERNAL_VITE_DEV) {
     const proxy = httpProxy.createProxyServer({
       target: `http://localhost:${process.env.CYPRESS_INTERNAL_VITE_APP_PORT}/`,
@@ -293,7 +297,7 @@ export const createCommonRoutes = ({
       // their own app.js files + spec.js files
       nodeProxy.web(req, res, {}, (e) => {
         if (e) {
-        debug('Proxy request error. This is likely the socket hangup issue, we can basically ignore this because the stream will automatically continue once the asset will be available', e)
+          debug('Proxy request error. This is likely the socket hangup issue, we can basically ignore this because the stream will automatically continue once the asset will be available', e)
         }
       })
     })
